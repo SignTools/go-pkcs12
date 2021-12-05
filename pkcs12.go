@@ -456,7 +456,7 @@ func getSafeContents(p12Data, password []byte, expectedItems int) (bags []safeBa
 // 3DES  The private key bag and the end-entity certificate bag have the
 // LocalKeyId attribute set to the SHA-1 fingerprint of the end-entity
 // certificate.
-func Encode(rand io.Reader, privateKey interface{}, certificate *x509.Certificate, caCerts []*x509.Certificate, password string) (pfxData []byte, err error) {
+func Encode(rand io.Reader, privateKeys []interface{}, certificates []*x509.Certificate, caCerts []*x509.Certificate, password string) (pfxData []byte, err error) {
 	encodedPassword, err := bmpStringZeroTerminated(password)
 	if err != nil {
 		return nil, err
@@ -465,7 +465,11 @@ func Encode(rand io.Reader, privateKey interface{}, certificate *x509.Certificat
 	var pfx pfxPdu
 	pfx.Version = 3
 
-	var certFingerprint = sha1.Sum(certificate.Raw)
+	var hasher = sha1.New()
+	for _, certificate := range certificates {
+		hasher.Write(certificate.Raw)
+	}
+	var certFingerprint = hasher.Sum(nil)
 	var localKeyIdAttr pkcs12Attribute
 	localKeyIdAttr.Id = oidLocalKeyID
 	localKeyIdAttr.Value.Class = 0
@@ -477,10 +481,12 @@ func Encode(rand io.Reader, privateKey interface{}, certificate *x509.Certificat
 
 	var certBags []safeBag
 	var certBag *safeBag
-	if certBag, err = makeCertBag(certificate.Raw, []pkcs12Attribute{localKeyIdAttr}); err != nil {
-		return nil, err
+	for _, certificate := range certificates {
+		if certBag, err = makeCertBag(certificate.Raw, []pkcs12Attribute{localKeyIdAttr}); err != nil {
+			return nil, err
+		}
+		certBags = append(certBags, *certBag)
 	}
-	certBags = append(certBags, *certBag)
 
 	for _, cert := range caCerts {
 		if certBag, err = makeCertBag(cert.Raw, []pkcs12Attribute{}); err != nil {
@@ -489,15 +495,19 @@ func Encode(rand io.Reader, privateKey interface{}, certificate *x509.Certificat
 		certBags = append(certBags, *certBag)
 	}
 
-	var keyBag safeBag
-	keyBag.Id = oidPKCS8ShroundedKeyBag
-	keyBag.Value.Class = 2
-	keyBag.Value.Tag = 0
-	keyBag.Value.IsCompound = true
-	if keyBag.Value.Bytes, err = encodePkcs8ShroudedKeyBag(rand, privateKey, encodedPassword); err != nil {
-		return nil, err
+	var keyBags []safeBag
+	for _, privateKey := range privateKeys {
+		var keyBag safeBag
+		keyBag.Id = oidPKCS8ShroundedKeyBag
+		keyBag.Value.Class = 2
+		keyBag.Value.Tag = 0
+		keyBag.Value.IsCompound = true
+		if keyBag.Value.Bytes, err = encodePkcs8ShroudedKeyBag(rand, privateKey, encodedPassword); err != nil {
+			return nil, err
+		}
+		keyBag.Attributes = append(keyBag.Attributes, localKeyIdAttr)
+		keyBags = append(keyBags, keyBag)
 	}
-	keyBag.Attributes = append(keyBag.Attributes, localKeyIdAttr)
 
 	// Construct an authenticated safe with two SafeContents.
 	// The first SafeContents is encrypted and contains the cert bags.
@@ -506,7 +516,7 @@ func Encode(rand io.Reader, privateKey interface{}, certificate *x509.Certificat
 	if authenticatedSafe[0], err = makeSafeContents(rand, certBags, encodedPassword); err != nil {
 		return nil, err
 	}
-	if authenticatedSafe[1], err = makeSafeContents(rand, []safeBag{keyBag}, nil); err != nil {
+	if authenticatedSafe[1], err = makeSafeContents(rand, keyBags, nil); err != nil {
 		return nil, err
 	}
 
